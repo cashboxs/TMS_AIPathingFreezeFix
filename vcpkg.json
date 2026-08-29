@@ -1,0 +1,8 @@
+{
+  "name": "tms-ai-pathing-freeze-fix",
+  "version-string": "1.0",
+  "description": "SKSE fix for a Skyrim AI pathing hard freeze caused by invalid non-finite direction output reaching an angle-normalization loop.",
+  "dependencies": [
+    "commonlibsse-ng"
+  ]
+}
