@@ -11,7 +11,7 @@
 
 namespace
 {
-    constexpr auto kVersion = "1.0";
+    constexpr auto kVersion = "1.1";
     constexpr std::size_t kCallSize = 5;
     constexpr std::size_t kAngleValidationWindow = 0xA0;
     constexpr std::uint64_t kDetailedRepairLimit = 3;
@@ -98,7 +98,9 @@ namespace
         return false;
     }
 
-    bool MatchProducerCall(
+    // AE pattern (1.6.x): lea rdx,[rbp+XX] / lea rcx,[rsp+..] before producer,
+    // lea rcx,[rbp+XX] before angle. SE 1.5.97 uses rsp-relative locals instead.
+    bool MatchProducerCallAE(
         std::uintptr_t angleCall,
         std::uintptr_t textBegin,
         std::size_t textSize,
@@ -152,6 +154,76 @@ namespace
         }
 
         return false;
+    }
+
+    // ponytail: SE 1.5.97 pattern only, add when another runtime needs its own shape.
+    // Verified on decrypted 1.5.97: producer callsite SkyrimSE.exe+0x10BDEAD,
+    // angle callsite SkyrimSE.exe+0x10BDEBF, angle SkyrimSE.exe+0xC51F70 (REL ID 68820).
+    // Sequence: lea rdx,[rsp+XX] / mov rcx,rax / call producer /
+    // movss xmm,[RIP] / lea rcx,[rsp+XX] / call angle. Return value ignored by caller.
+    bool MatchProducerCallSE(
+        std::uintptr_t angleCall,
+        std::uintptr_t textBegin,
+        std::size_t textSize,
+        std::uintptr_t& producerCall) noexcept
+    {
+        producerCall = 0;
+
+        if (!InRange(angleCall, textBegin, textSize) || angleCall < textBegin + 40) {
+            return false;
+        }
+
+        const auto* angle = reinterpret_cast<const std::uint8_t*>(angleCall);
+        if (angle[-5] != 0x48 || angle[-4] != 0x8D || angle[-3] != 0x4C || angle[-2] != 0x24) {
+            return false;
+        }
+
+        const auto rspDisplacement = angle[-1];
+        const auto searchBegin = angleCall - 40;
+        const auto searchEnd = angleCall - 9;
+
+        for (auto candidate = searchBegin; candidate <= searchEnd; ++candidate) {
+            const auto* call = reinterpret_cast<const std::uint8_t*>(candidate);
+            if (*call != 0xE8 || candidate < textBegin + 8) {
+                continue;
+            }
+
+            // lea rdx,[rsp+YY] with YY == angle's rsp displacement,
+            // followed by mov rcx,rax (source pointer forwarded from entry rdx).
+            const auto* prefix = call - 8;
+            if (prefix[0] != 0x48 || prefix[1] != 0x8D || prefix[2] != 0x54 || prefix[3] != 0x24 ||
+                prefix[4] != rspDisplacement || prefix[5] != 0x48 || prefix[6] != 0x8B ||
+                prefix[7] != 0xC8) {
+                continue;
+            }
+
+            const auto middleBegin = candidate + kCallSize;
+            const auto middleEnd = angleCall - 5;
+            if (middleEnd <= middleBegin || middleEnd - middleBegin > 24) {
+                continue;
+            }
+
+            if (!HasRipRelativeMovss(middleBegin, middleEnd)) {
+                continue;
+            }
+
+            producerCall = candidate;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool MatchProducerCall(
+        std::uintptr_t angleCall,
+        std::uintptr_t textBegin,
+        std::size_t textSize,
+        std::uintptr_t& producerCall) noexcept
+    {
+        if (MatchProducerCallAE(angleCall, textBegin, textSize, producerCall)) {
+            return true;
+        }
+        return MatchProducerCallSE(angleCall, textBegin, textSize, producerCall);
     }
 
     std::uintptr_t FindVulnerableCallsite(
